@@ -53,8 +53,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate()
         }
+        // Have Quick Open ready before it's first needed.
+        appState.quickOpen.prepare(appState: appState)
+        appState.discovered.scanIfNeeded(maxAge: 60 * 60, recents: appState.recents.repositories)
+
         #if DEBUG
         WindowSnapshotter.startIfRequested()
+        if let query = ProcessInfo.processInfo.environment["GITY_DEBUG_QUICK_OPEN"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [appState] in
+                appState.quickOpen.show(appState: appState, from: nil, openWindow: nil)
+                appState.quickOpen.model.query = query
+            }
+        }
         #endif
     }
 

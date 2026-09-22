@@ -14,15 +14,14 @@ struct RepositoryWindow: View {
 
 private struct RepositoryWindowContent: View {
     @State private var model: RepositoryModel
-    let switchRepository: (URL) -> Void
 
     @Environment(AppState.self) private var appState
     @Environment(\.dismissWindow) private var dismissWindow
 
     init(url: URL, switchRepository: @escaping (URL) -> Void) {
-        let git = AppState.currentGitExecutableURL
-        _model = State(initialValue: RepositoryModel(url: url, gitExecutableURL: git))
-        self.switchRepository = switchRepository
+        let model = RepositoryModel(url: url, gitExecutableURL: AppState.currentGitExecutableURL)
+        model.switchRepository = switchRepository
+        _model = State(initialValue: model)
     }
 
     var body: some View {
@@ -38,7 +37,10 @@ private struct RepositoryWindowContent: View {
         .background(WindowsMenuTitle(title: model.name))
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                RepositorySwitcherButton(model: model, switchRepository: switchRepository)
+                RepositorySwitcherButton(model: model)
+            }
+            ToolbarItem(placement: .navigation) {
+                QuickOpenButton(repository: model)
             }
             RepositoryToolbar(model: model)
         }

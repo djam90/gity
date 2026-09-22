@@ -19,6 +19,14 @@ A native macOS Git client in SwiftUI, in the spirit of Tower.
 - Unified diff view with old/new line numbers, hunk headers, binary detection, and truncation of large diffs ("Show Full Diff")
 - Diff options: ignore whitespace, context lines (1/3/10/25/entire file), remembered in UserDefaults
 
+## Iteration 3: Tower-style navigation
+
+- Staging: space bar, context menu, per-section Stage All / Unstage All; selection follows the file
+- Repository switcher in the toolbar (⌥⌘O), switching the window in place
+- Quick Open (⇧⌘O): instant Spotlight-style panel with fuzzy search over recent repositories and
+  every repository on this Mac. The index is cached in Application Support, rebuilt in the background
+  (skipping privacy-protected folders), and topped up with Spotlight folder-name matches while typing.
+
 ## Build
 
 ```sh

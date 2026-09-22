@@ -16,6 +16,8 @@ enum PreferenceKey {
 @Observable
 final class AppState {
     let recents = RecentRepositoriesStore()
+    let discovered = DiscoveredRepositoriesStore()
+    @ObservationIgnored let quickOpen = QuickOpenController()
 
     /// Folders the system asked us to open, consumed by the first window that sees them.
     var pendingOpenURLs: [URL] = []
@@ -30,6 +32,36 @@ final class AppState {
     }
 
     // MARK: - Opening
+
+    /// - Parameter repository: The window Quick Open was invoked from; picking a repository replaces it.
+    func toggleQuickOpen(from repository: RepositoryModel?, openWindow: OpenWindowAction) {
+        quickOpen.toggle(appState: self, from: repository, openWindow: openWindow)
+    }
+
+    enum RepositoryReference {
+        case recent(RecentRepository)
+        case url(URL)
+    }
+
+    /// Shows a repository in `window`, replacing what it shows. Falls back to opening a new window
+    /// when there is no window to replace, and focuses the existing window if the repository is
+    /// already open elsewhere so it never appears twice.
+    func open(_ reference: RepositoryReference, in window: RepositoryModel?, openWindow: OpenWindowAction) async {
+        let root: URL? = switch reference {
+        case .recent(let recent): await resolve(recent)
+        case .url(let url): await resolveRoot(containing: url)
+        }
+        guard let root else { return }
+        recents.noteOpened(root)
+
+        if window?.url.path == root.path { return }
+        let isOpenElsewhere = openRepositoryURLs.contains { $0.path == root.path }
+        if let window, let switchRepository = window.switchRepository, !isOpenElsewhere {
+            switchRepository(root)
+        } else {
+            openWindow(id: WindowID.repository, value: root)
+        }
+    }
 
     func showOpenPanel(openWindow: OpenWindowAction) {
         let panel = NSOpenPanel()

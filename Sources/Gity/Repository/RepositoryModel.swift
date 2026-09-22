@@ -33,6 +33,9 @@ final class RepositoryModel {
     private(set) var localBranchTree: [RefTreeNode<Branch>] = []
     private(set) var remoteBranchTrees: [String: [RefTreeNode<Branch>]] = [:]
 
+    /// Replaces the repository shown in this model's window. Set by the window.
+    @ObservationIgnored var switchRepository: ((URL) -> Void)?
+
     @ObservationIgnored private var watcher: RepositoryWatcher?
     @ObservationIgnored private var isRefreshing = false
     @ObservationIgnored private var needsAnotherRefresh = false

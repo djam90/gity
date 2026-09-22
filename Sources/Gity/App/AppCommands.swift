@@ -19,6 +19,11 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut("o")
 
+            Button("Quick Open…") {
+                appState.toggleQuickOpen(from: repository, openWindow: openWindow)
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+
             Menu("Open Recent") {
                 ForEach(appState.recents.repositories) { recent in
                     Button(recent.name) {
@@ -38,7 +43,7 @@ struct AppCommands: Commands {
                 Button("Switch Repository…") {
                     repository?.isShowingRepositorySwitcher = true
                 }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .keyboardShortcut("o", modifiers: [.command, .option])
 
                 Divider()
 

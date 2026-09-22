@@ -4,7 +4,6 @@ import SwiftUI
 /// Toolbar button showing the current repository and branch; opens the repository switcher.
 struct RepositorySwitcherButton: View {
     @Bindable var model: RepositoryModel
-    let switchRepository: (URL) -> Void
 
     @Environment(AppState.self) private var appState
     @Environment(\.openWindow) private var openWindow
@@ -34,17 +33,13 @@ struct RepositorySwitcherButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Switch repository (⇧⌘O)")
+        .help("Switch repository (⌥⌘O)")
         .background {
             FastPopover(isPresented: $model.isShowingRepositorySwitcher) {
                 RepositorySwitcher(
-                    currentURL: model.url,
+                    repository: model,
                     openWindow: openWindow,
-                    close: { model.isShowingRepositorySwitcher = false },
-                    switchRepository: { url in
-                        model.isShowingRepositorySwitcher = false
-                        switchRepository(url)
-                    }
+                    close: { model.isShowingRepositorySwitcher = false }
                 )
                 .environment(appState)
             }
@@ -54,11 +49,12 @@ struct RepositorySwitcherButton: View {
 
 /// Searchable list of recent repositories, navigable with the keyboard.
 private struct RepositorySwitcher: View {
-    let currentURL: URL
+    let repository: RepositoryModel
     /// Passed in because this view is hosted in its own AppKit popover.
     let openWindow: OpenWindowAction
     let close: () -> Void
-    let switchRepository: (URL) -> Void
+
+    private var currentURL: URL { repository.url }
 
     @Environment(AppState.self) private var appState
 
@@ -227,21 +223,9 @@ private struct RepositorySwitcher: View {
 
     /// Switches this window to the repository, or focuses the window already showing it.
     private func activate(_ id: RecentRepository.ID?) {
-        guard let repository = appState.recents.repositories.first(where: { $0.id == id }) else { return }
-        guard repository.path != currentURL.path else {
-            close()
-            return
-        }
-        Task {
-            guard let root = await appState.resolve(repository) else { return }
-            appState.recents.noteOpened(root)
-            if appState.openRepositoryURLs.contains(where: { $0.path == root.path }) {
-                close()
-                openWindow(id: WindowID.repository, value: root)
-            } else {
-                switchRepository(root)
-            }
-        }
+        guard let recent = appState.recents.repositories.first(where: { $0.id == id }) else { return }
+        close()
+        Task { await appState.open(.recent(recent), in: repository, openWindow: openWindow) }
     }
 }
 

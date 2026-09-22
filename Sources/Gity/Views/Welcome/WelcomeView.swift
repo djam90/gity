@@ -62,6 +62,13 @@ private struct WelcomeHero: View {
 
             VStack(spacing: 8) {
                 WelcomeActionButton(
+                    title: "Quick Open…",
+                    subtitle: "Find any repository on this Mac  ⇧⌘O",
+                    systemImage: "magnifyingglass"
+                ) {
+                    appState.toggleQuickOpen(from: nil, openWindow: openWindow)
+                }
+                WelcomeActionButton(
                     title: "Open Existing Repository…",
                     subtitle: "Browse for a local Git repository",
                     systemImage: "folder"

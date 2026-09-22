@@ -245,3 +245,38 @@ import Testing
         #expect(try await areas(client) == ["tracked.txt": .untracked])
     }
 }
+
+@Suite struct FuzzyMatcherTests {
+    @Test func matchesSubsequencesAtWordStarts() throws {
+        let match = try #require(FuzzyMatcher.match("gd", in: "gity-demo"))
+        #expect(match.indices == [0, 5])
+        #expect(FuzzyMatcher.match("xyz", in: "gity-demo") == nil)
+        #expect(FuzzyMatcher.match("GITY", in: "gity")?.indices == [0, 1, 2, 3], "case insensitive")
+    }
+
+    @Test func ranksBetterMatchesHigher() throws {
+        func score(_ query: String, _ candidate: String) throws -> Int {
+            try #require(FuzzyMatcher.match(query, in: candidate)).score
+        }
+        #expect(try score("demo", "gity-demo") > score("demo", "d-e-m-o-thing"), "contiguous beats scattered")
+        #expect(try score("gity", "gity") > score("gity", "my-gity-fork"), "prefix and shorter win")
+        #expect(try score("ms", "MySite") > score("ms", "atoms"), "camel case word starts")
+    }
+}
+
+@Suite struct RepositoryScannerTests {
+    @Test func findsRepositoriesWithoutDescendingIntoThem() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "gity-scan-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for path in ["a/.git", "a/nested/.git", "b/c/.git", "node_modules/pkg/.git", "deep/1/2/3/4/.git"] {
+            try fm.createDirectory(at: root.appending(path: path), withIntermediateDirectories: true)
+        }
+        // Worktrees use a `.git` file rather than a folder.
+        try fm.createDirectory(at: root.appending(path: "worktree"), withIntermediateDirectories: true)
+        try "gitdir: /elsewhere".write(to: root.appending(path: "worktree/.git"), atomically: true, encoding: .utf8)
+
+        let found = RepositoryScanner.scan([.init(url: root, maxDepth: 3)]).map(\.lastPathComponent).sorted()
+        #expect(found == ["a", "c", "worktree"])
+    }
+}
