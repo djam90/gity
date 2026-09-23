@@ -10,7 +10,21 @@ struct SidebarView: View {
     @SceneStorage("sidebar.tagsExpanded") private var tagsExpanded = false
     @SceneStorage("sidebar.stashesExpanded") private var stashesExpanded = true
 
+    /// A branch dropped onto the current branch, asking whether to merge or rebase.
+    @State private var droppedBranch: Branch?
+
     private var isFiltering: Bool { !model.filterText.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var currentName: String { model.currentBranch?.name ?? "HEAD" }
+    private var dropTitle: String { droppedBranch.map { "Integrate “\($0.shortName)” into “\(currentName)”?" } ?? "" }
+
+    /// Drop target on the current branch: drag another branch onto it to merge or rebase, like Tower.
+    private func acceptingBranchDrops<Content: View>(_ content: Content) -> some View {
+        content.dropDestination(for: String.self) { refNames, _ in
+            guard let refName = refNames.first, let branch = model.branch(refName), !branch.isHead else { return false }
+            droppedBranch = branch
+            return true
+        }
+    }
 
     var body: some View {
         List(selection: $model.selection) {
@@ -20,6 +34,9 @@ struct SidebarView: View {
                     .tag(SidebarItem.workingCopy)
                 Label("History", systemImage: "clock")
                     .tag(SidebarItem.history)
+                Label("Reflog", systemImage: "clock.arrow.circlepath")
+                    .tag(SidebarItem.reflog)
+                    .help("Every commit HEAD has pointed at recently, to find lost work")
             }
 
             if let snapshot = model.snapshot {
@@ -34,12 +51,39 @@ struct SidebarView: View {
         .searchable(text: $model.filterText, placement: .sidebar, prompt: "Filter")
         .contextMenu(forSelectionType: SidebarItem.self) { items in
             if let item = items.first {
-                contextMenu(for: item)
+                SidebarContextMenu(model: model, item: item)
             }
         } primaryAction: { items in
             // Double-click a branch to check it out, like Tower and Xcode.
             guard case .ref(let refName)? = items.first, let branch = model.branch(refName) else { return }
             Task { await model.checkout(branch) }
+        }
+        .onDeleteCommand {
+            // Delete key: delete the selected branch, tag or stash, after confirming.
+            switch model.selection {
+            case .ref(let refName):
+                if let branch = model.branch(refName) {
+                    Task { await model.delete(branch) }
+                } else if let tag = model.tag(refName) {
+                    Task { await model.delete(tag) }
+                }
+            case .stash(let selector):
+                if let stash = model.stash(selector) { Task { await model.drop(stash) } }
+            default:
+                break
+            }
+        }
+        .confirmationDialog(
+            dropTitle,
+            isPresented: Binding(get: { droppedBranch != nil }, set: { if !$0 { droppedBranch = nil } }),
+            presenting: droppedBranch
+        ) { branch in
+            Button("Merge “\(branch.shortName)” into “\(currentName)”") {
+                Task { await model.merge(branch.refName, name: branch.shortName) }
+            }
+            Button("Rebase “\(currentName)” onto “\(branch.shortName)”") {
+                Task { await model.rebase(onto: branch.refName, name: branch.shortName) }
+            }
         }
         .overlay {
             if model.snapshot == nil, model.loadError == nil {
@@ -61,8 +105,10 @@ struct SidebarView: View {
             }
             // The checked out branch always comes first, with its full name even if it lives in a folder.
             if let current = snapshot.currentBranch {
-                BranchRow(title: current.name, branch: current, isCurrent: true)
-                    .tag(SidebarItem.ref(current.refName))
+                acceptingBranchDrops(
+                    BranchRow(title: current.name, branch: current, isCurrent: true)
+                        .tag(SidebarItem.ref(current.refName))
+                )
             }
             OutlineGroup(model.localBranchTree, children: \.children) { node in
                 BranchNodeRow(node: node)
@@ -112,12 +158,12 @@ struct SidebarView: View {
 
         if !locals.isEmpty {
             Section("Branches") {
-                ForEach(locals) { BranchRow(title: $0.name, branch: $0, isCurrent: $0.isHead).tag(SidebarItem.ref($0.refName)) }
+                ForEach(locals) { BranchRow(title: $0.name, branch: $0, isCurrent: $0.isHead).tag(SidebarItem.ref($0.refName)).draggable($0.refName) }
             }
         }
         if !remotes.isEmpty {
             Section("Remotes") {
-                ForEach(remotes) { BranchRow(title: $0.shortName, branch: $0, isCurrent: false).tag(SidebarItem.ref($0.refName)) }
+                ForEach(remotes) { BranchRow(title: $0.shortName, branch: $0, isCurrent: false).tag(SidebarItem.ref($0.refName)).draggable($0.refName) }
             }
         }
         if !tags.isEmpty {
@@ -132,37 +178,6 @@ struct SidebarView: View {
                 .selectionDisabled()
         }
     }
-
-    // MARK: - Context menu
-
-    @ViewBuilder
-    private func contextMenu(for item: SidebarItem) -> some View {
-        switch item {
-        case .ref(let refName):
-            if let branch = model.branch(refName) {
-                Button(branch.isRemote ? "Check Out as Local Branch" : "Check Out “\(branch.name)”") {
-                    Task { await model.checkout(branch) }
-                }
-                .disabled(branch.isHead)
-                Divider()
-                Button("Copy Branch Name") { copyToPasteboard(branch.isRemote ? branch.shortName : branch.name) }
-                Button("Copy Commit SHA") { copyToPasteboard(branch.tipSHA) }
-            } else if let tag = model.tag(refName) {
-                Button("Copy Tag Name") { copyToPasteboard(tag.name) }
-                Button("Copy Commit SHA") { copyToPasteboard(tag.targetSHA) }
-            }
-        case .workingCopy, .history:
-            Button("Show in Finder") { model.revealInFinder() }
-            Button("Open in Terminal") { model.openInTerminal() }
-        case .stash(let selector):
-            Button("Copy Stash Name") { copyToPasteboard(selector) }
-        }
-    }
-
-    private func copyToPasteboard(_ string: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(string, forType: .string)
-    }
 }
 
 // MARK: - Rows
@@ -174,6 +189,7 @@ private struct BranchNodeRow: View {
         if let branch = node.item {
             BranchRow(title: node.name, branch: branch, isCurrent: branch.isHead)
                 .tag(SidebarItem.ref(branch.refName))
+                .draggable(branch.refName)
         } else {
             Label(node.name, systemImage: "folder")
                 .selectionDisabled()

@@ -40,14 +40,23 @@ public struct DiffHunk: Hashable, Sendable {
     /// The full `@@ -a,b +c,d @@ context` line.
     public let header: String
     public let lines: [DiffLine]
+    /// Start lines from the header, as written (`0` for an empty side).
+    public let oldStart: Int
+    public let newStart: Int
 
-    public init(header: String, lines: [DiffLine]) {
+    public init(header: String, lines: [DiffLine], oldStart: Int = 1, newStart: Int = 1) {
         self.header = header
         self.lines = lines
+        self.oldStart = oldStart
+        self.newStart = newStart
     }
 }
 
 public struct FileDiff: Hashable, Sendable {
+    /// Lines before the first hunk (`diff --git`, `index`, `---`, `+++`…), needed to build patches.
+    public var headerLines: [String] = []
+    /// True for combined diffs (conflicts), which can't be turned into patches.
+    public var isCombined = false
     public var hunks: [DiffHunk]
     public var isBinary: Bool
     /// Counted over the whole diff, even when `isTruncated`.
@@ -96,10 +105,11 @@ extension GitParser {
         var markerWidth = 1
         var oldNumber = 0
         var newNumber = 0
+        var starts = (old: 0, new: 0)
 
         func finishHunk() {
             if let hunkHeader {
-                result.hunks.append(DiffHunk(header: hunkHeader, lines: hunkLines))
+                result.hunks.append(DiffHunk(header: hunkHeader, lines: hunkLines, oldStart: starts.old, newStart: starts.new))
             }
             hunkHeader = nil
             hunkLines = []
@@ -113,7 +123,9 @@ extension GitParser {
                 isInHunk = true
                 // `@@` for normal diffs, `@@@` for combined diffs with two parents.
                 markerWidth = max(1, line.prefix { $0 == "@" }.count - 1)
-                (oldNumber, newNumber) = parseHunkRanges(line)
+                result.isCombined = markerWidth > 1
+                starts = parseHunkStarts(line)
+                (oldNumber, newNumber) = (max(starts.old, 1), max(starts.new, 1))
                 if !result.isTruncated {
                     hunkHeader = String(line)
                 }
@@ -129,6 +141,9 @@ extension GitParser {
                 if line.hasPrefix("Binary files ") || line.hasPrefix("GIT binary patch") {
                     result.isBinary = true
                 }
+                if result.hunks.isEmpty, !line.isEmpty {
+                    result.headerLines.append(String(line))
+                }
                 continue
             }
 
@@ -137,7 +152,8 @@ extension GitParser {
                 diffLine = DiffLine(kind: .noNewlineMarker, text: String(line.dropFirst(2)), oldNumber: nil, newNumber: nil)
             } else {
                 let markers = line.prefix(markerWidth)
-                let text = String(line.dropFirst(markerWidth)).replacingOccurrences(of: "\t", with: "    ")
+                // Kept verbatim (tabs, trailing spaces) so lines can be turned back into patches.
+                let text = String(line.dropFirst(markerWidth))
                 if markers.contains("+") {
                     diffLine = DiffLine(kind: .addition, text: text, oldNumber: nil, newNumber: newNumber)
                     newNumber += 1
@@ -170,17 +186,17 @@ extension GitParser {
         character == " " || character == "+" || character == "-" || character == "\\"
     }
 
-    /// Extracts start line numbers from `@@ -a,b +c,d @@` or `@@@ -a,b -c,d +e,f @@@`.
-    static func parseHunkRanges(_ header: Substring) -> (old: Int, new: Int) {
-        var old = 0
+    /// Extracts start line numbers from `@@ -a,b +c,d @@` or `@@@ -a,b -c,d +e,f @@@`, as written.
+    static func parseHunkStarts(_ header: Substring) -> (old: Int, new: Int) {
+        var old: Int?
         var new = 0
         for token in header.split(separator: " ").dropFirst() {
             if token.hasPrefix("@") { break }
             let start = Int(token.dropFirst().prefix { $0 != "," }) ?? 0
-            if token.hasPrefix("-"), old == 0 { old = max(start, 1) }
-            if token.hasPrefix("+") { new = max(start, 1) }
+            if token.hasPrefix("-"), old == nil { old = start }
+            if token.hasPrefix("+") { new = start }
         }
-        return (max(old, 1), max(new, 1))
+        return (old ?? 0, new)
     }
 
     /// Parses `git diff --name-status -z` output.

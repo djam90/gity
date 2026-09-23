@@ -41,18 +41,21 @@ public struct GitClient: Sendable {
         async let remoteOutput = runner.string(["remote"])
         // Stash listing fails on some unusual setups (e.g. unborn HEAD on old gits); treat as empty.
         async let stashOutput = try? runner.string(["stash", "list", "--format=\(GitParser.stashFormat)"])
+        async let gitDirectory = try? gitDirectory()
 
         let status = GitParser.status(try await statusData)
         let remoteNames = try await remoteOutput.split(whereSeparator: \.isNewline).map(String.init)
         let refs = GitParser.refs(try await refOutput, remoteNames: remoteNames)
         let stashes = GitParser.stashes(await stashOutput ?? "")
+        let pendingOperation = await gitDirectory.flatMap { pendingOperation(gitDirectory: $0) }
 
         return RepositorySnapshot(
             status: status,
             localBranches: refs.localBranches,
             remotes: refs.remotes,
             tags: refs.tags,
-            stashes: stashes
+            stashes: stashes,
+            pendingOperation: pendingOperation
         )
     }
 
@@ -160,7 +163,4 @@ public struct GitClient: Sendable {
         try await runner.run(["switch", "--create", remoteBranch.name, "--track", remoteBranch.shortName])
     }
 
-    public func fetchAll() async throws {
-        try await runner.run(["fetch", "--all", "--prune"])
-    }
 }

@@ -134,7 +134,8 @@ public struct Decoration: Hashable, Sendable {
 }
 
 public struct Commit: Identifiable, Hashable, Sendable {
-    public var id: String { sha }
+    /// Reflog entries can list the same commit several times, so they are identified by selector.
+    public var id: String { reflogSelector ?? sha }
     public let sha: String
     public let shortSHA: String
     public let parents: [String]
@@ -143,10 +144,14 @@ public struct Commit: Identifiable, Hashable, Sendable {
     public let authorDate: Date
     public let subject: String
     public let decorations: [Decoration]
+    /// For reflog entries: the selector (`HEAD@{3}`) and what happened (`commit: Fix typo`).
+    public let reflogSelector: String?
+    public let reflogSubject: String?
 
     public init(
         sha: String, shortSHA: String, parents: [String], authorName: String, authorEmail: String,
-        authorDate: Date, subject: String, decorations: [Decoration]
+        authorDate: Date, subject: String, decorations: [Decoration],
+        reflogSelector: String? = nil, reflogSubject: String? = nil
     ) {
         self.sha = sha
         self.shortSHA = shortSHA
@@ -156,7 +161,11 @@ public struct Commit: Identifiable, Hashable, Sendable {
         self.authorDate = authorDate
         self.subject = subject
         self.decorations = decorations
+        self.reflogSelector = reflogSelector
+        self.reflogSubject = reflogSubject
     }
+
+    public var isMerge: Bool { parents.count > 1 }
 }
 
 public struct FileChange: Identifiable, Hashable, Sendable {
@@ -209,6 +218,42 @@ public struct WorkingCopyStatus: Equatable, Sendable {
     }
 }
 
+/// A merge, rebase, cherry-pick or revert that stopped part-way, usually because of conflicts.
+public struct PendingOperation: Hashable, Sendable {
+    public enum Kind: Hashable, Sendable {
+        case merge
+        case rebase
+        case cherryPick
+        case revert
+    }
+
+    public let kind: Kind
+    /// Rebases: the branch being rebased, e.g. `feature`.
+    public let branchName: String?
+    /// Rebases: the current step and the total number of steps.
+    public let step: Int?
+    public let totalSteps: Int?
+    /// The message git prepared for the resulting commit (`MERGE_MSG`).
+    public let message: String?
+
+    public init(kind: Kind, branchName: String? = nil, step: Int? = nil, totalSteps: Int? = nil, message: String? = nil) {
+        self.kind = kind
+        self.branchName = branchName
+        self.step = step
+        self.totalSteps = totalSteps
+        self.message = message
+    }
+
+    public var title: String {
+        switch kind {
+        case .merge: "Merge"
+        case .rebase: "Rebase"
+        case .cherryPick: "Cherry-Pick"
+        case .revert: "Revert"
+        }
+    }
+}
+
 /// Everything the repository window needs to render its sidebar, fetched in one go.
 public struct RepositorySnapshot: Equatable, Sendable {
     public var status: WorkingCopyStatus
@@ -216,13 +261,22 @@ public struct RepositorySnapshot: Equatable, Sendable {
     public var remotes: [Remote]
     public var tags: [Tag]
     public var stashes: [Stash]
+    public var pendingOperation: PendingOperation?
 
-    public init(status: WorkingCopyStatus, localBranches: [Branch], remotes: [Remote], tags: [Tag], stashes: [Stash]) {
+    public init(
+        status: WorkingCopyStatus, localBranches: [Branch], remotes: [Remote], tags: [Tag], stashes: [Stash],
+        pendingOperation: PendingOperation? = nil
+    ) {
         self.status = status
         self.localBranches = localBranches
         self.remotes = remotes
         self.tags = tags
         self.stashes = stashes
+        self.pendingOperation = pendingOperation
+    }
+
+    public var hasConflicts: Bool {
+        status.changes.contains { $0.area == .conflicted }
     }
 
     public var head: HeadState { status.head }
@@ -230,4 +284,97 @@ public struct RepositorySnapshot: Equatable, Sendable {
     public var currentBranch: Branch? {
         localBranches.first(where: \.isHead)
     }
+}
+
+/// One line of `git blame` output.
+public struct BlameLine: Identifiable, Hashable, Sendable {
+    public var id: Int { lineNumber }
+    public let sha: String
+    public let lineNumber: Int
+    public let text: String
+
+    public init(sha: String, lineNumber: Int, text: String) {
+        self.sha = sha
+        self.lineNumber = lineNumber
+        self.text = text
+    }
+
+    /// Lines changed in the working copy are attributed to the all-zero SHA.
+    public var isUncommitted: Bool { sha.allSatisfy { $0 == "0" } }
+}
+
+public struct BlameCommit: Hashable, Sendable {
+    public let sha: String
+    public let authorName: String
+    public let authorEmail: String
+    public let authorDate: Date
+    public let summary: String
+
+    public init(sha: String, authorName: String, authorEmail: String, authorDate: Date, summary: String) {
+        self.sha = sha
+        self.authorName = authorName
+        self.authorEmail = authorEmail
+        self.authorDate = authorDate
+        self.summary = summary
+    }
+}
+
+public struct Blame: Hashable, Sendable {
+    public var lines: [BlameLine]
+    public var commits: [String: BlameCommit]
+
+    public init(lines: [BlameLine] = [], commits: [String: BlameCommit] = [:]) {
+        self.lines = lines
+        self.commits = commits
+    }
+}
+
+/// A commit that touched a file, with the file's path in that commit (it may have been renamed since).
+public struct FileHistoryEntry: Identifiable, Hashable, Sendable {
+    public var id: String { commit.sha }
+    public let commit: Commit
+    public let path: String
+    public let originalPath: String?
+    public let kind: FileChange.Kind
+
+    public init(commit: Commit, path: String, originalPath: String? = nil, kind: FileChange.Kind) {
+        self.commit = commit
+        self.path = path
+        self.originalPath = originalPath
+        self.kind = kind
+    }
+}
+
+/// One line of an interactive rebase plan, oldest commit first.
+public struct RebaseStep: Identifiable, Hashable, Sendable {
+    public enum Action: String, Hashable, Sendable, CaseIterable {
+        case pick
+        case reword
+        case squash
+        case fixup
+        case drop
+    }
+
+    public var id: String { sha }
+    public let sha: String
+    public var action: Action
+    /// Replaces the resulting commit's message. For a commit followed by squashes, the message of the combined commit.
+    public var message: String?
+
+    public init(sha: String, action: Action = .pick, message: String? = nil) {
+        self.sha = sha
+        self.action = action
+        self.message = message
+    }
+}
+
+public enum ResetMode: String, Hashable, Sendable {
+    /// Keep changes staged.
+    case soft
+    /// Keep changes unstaged.
+    case mixed
+    /// Throw changes away.
+    case hard
+    /// Like hard, but refuses to overwrite local changes.
+    case keep
 }

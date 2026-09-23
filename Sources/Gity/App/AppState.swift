@@ -10,6 +10,12 @@ enum WindowID {
 
 enum PreferenceKey {
     static let gitExecutablePath = "gitExecutablePath"
+    /// Whether Pull rebases instead of merging.
+    static let pullRebases = "pullRebases"
+    /// Whether pull, merge and rebase stash local changes first and restore them afterwards.
+    static let autostash = "autostash"
+    /// Minutes between background fetches; 0 turns them off.
+    static let autoFetchMinutes = "autoFetchMinutes"
 }
 
 /// App-wide state shared by every window: recent repositories and the open/create flows.

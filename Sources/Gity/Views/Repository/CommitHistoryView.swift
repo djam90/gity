@@ -11,6 +11,10 @@ struct CommitHistoryView: View {
     @State private var hasLoaded = false
     @State private var loadError: String?
     @State private var selectedCommits = Set<Commit.ID>()
+    /// Commits on the current branch that history rewriting can change.
+    @State private var rewritable: Set<String> = []
+
+    private var isReflog: Bool { item == .reflog }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,11 +44,20 @@ struct CommitHistoryView: View {
         Table(commits, selection: $selectedCommits) {
             TableColumn("Description") { commit in
                 HStack(spacing: 6) {
-                    ForEach(commit.decorations.filter { $0.kind != .head }, id: \.self) { decoration in
-                        DecorationPill(decoration: decoration)
+                    if let reflogSubject = commit.reflogSubject {
+                        // What happened (e.g. "reset: moving to HEAD~1"), then the commit it led to.
+                        Text(reflogSubject)
+                            .lineLimit(1)
+                        Text(commit.subject)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        ForEach(commit.decorations.filter { $0.kind != .head }, id: \.self) { decoration in
+                            DecorationPill(decoration: decoration)
+                        }
+                        Text(commit.subject)
+                            .lineLimit(1)
                     }
-                    Text(commit.subject)
-                        .lineLimit(1)
                 }
             }
             TableColumn("Author") { commit in
@@ -68,12 +81,7 @@ struct CommitHistoryView: View {
         }
         .tableStyle(.inset)
         .contextMenu(forSelectionType: Commit.ID.self) { ids in
-            Button("Copy SHA") { copy(ids.sorted().joined(separator: "\n")) }
-                .disabled(ids.isEmpty)
-            Button("Copy Subject") {
-                copy(commits.filter { ids.contains($0.id) }.map(\.subject).joined(separator: "\n"))
-            }
-            .disabled(ids.isEmpty)
+            CommitContextMenu(model: model, commits: commits.filter { ids.contains($0.id) }, rewritable: rewritable)
         }
         .overlay {
             if !hasLoaded {
@@ -96,6 +104,7 @@ struct CommitHistoryView: View {
     }
 
     private func load() async {
+        rewritable = await model.rewritableCommits().all
         do {
             let loaded = try await model.commits(for: item)
             guard !Task.isCancelled else { return }
@@ -113,10 +122,6 @@ struct CommitHistoryView: View {
         hasLoaded = true
     }
 
-    private func copy(_ string: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(string, forType: .string)
-    }
 }
 
 // MARK: - Header
@@ -162,12 +167,14 @@ private struct RefHeaderView: View {
                 Button("Check Out") {
                     Task { await model.checkout(branch) }
                 }
-                .disabled(model.isSwitchingBranch)
+                .disabled(model.isBusy)
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
     }
+
+    private var isReflogItem: Bool { item == .reflog }
 
     private var isCurrentBranch: Bool {
         if case .ref(let refName) = item { return model.branch(refName)?.isHead ?? false }
@@ -177,6 +184,7 @@ private struct RefHeaderView: View {
     private var symbol: String {
         switch item {
         case .history: "clock"
+        case .reflog: "clock.arrow.circlepath"
         case .stash: "archivebox"
         case .workingCopy: "square.and.pencil"
         case .ref(let refName):
@@ -189,6 +197,7 @@ private struct RefHeaderView: View {
     private var title: String {
         switch item {
         case .history: "History"
+        case .reflog: "Reflog"
         case .workingCopy: "Working Copy"
         case .stash(let selector): model.stash(selector)?.message ?? selector
         case .ref(let refName):
@@ -201,6 +210,8 @@ private struct RefHeaderView: View {
         switch item {
         case .history:
             parts.append("All branches and tags")
+        case .reflog:
+            parts.append("Where HEAD has been. Right-click an entry to restore it")
         case .ref(let refName):
             if let branch = model.branch(refName) {
                 if let upstream = branch.upstream {
@@ -230,7 +241,9 @@ private struct RefHeaderView: View {
             break
         }
         if let commitCount {
-            parts.append(commitCount >= 500 ? "500+ commits" : "\(commitCount) commit\(commitCount == 1 ? "" : "s")")
+            let noun = isReflogItem ? "entr" : "commit"
+            let plural = isReflogItem ? (commitCount == 1 ? "y" : "ies") : (commitCount == 1 ? "" : "s")
+            parts.append(commitCount >= 500 ? "500+ \(noun)\(isReflogItem ? "ies" : "s")" : "\(commitCount) \(noun)\(plural)")
         }
         return parts.joined(separator: " · ")
     }

@@ -7,6 +7,9 @@ struct SettingsView: View {
             Tab("General", systemImage: "gearshape") {
                 GeneralSettingsView()
             }
+            Tab("Workflow", systemImage: "arrow.triangle.branch") {
+                WorkflowSettingsView()
+            }
         }
         .scenePadding()
         .frame(width: 500)
@@ -54,5 +57,45 @@ private struct GeneralSettingsView: View {
 
     private var detectedPath: String? {
         GitExecutable.locate()?.path
+    }
+}
+
+private struct WorkflowSettingsView: View {
+    @AppStorage(PreferenceKey.pullRebases) private var pullRebases = false
+    @AppStorage(PreferenceKey.autostash) private var autostash = true
+    @AppStorage(PreferenceKey.autoFetchMinutes) private var autoFetchMinutes = 10
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Pull", selection: $pullRebases) {
+                    Text("Merge").tag(false)
+                    Text("Rebase").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                Toggle("Stash local changes automatically", isOn: $autostash)
+            } header: {
+                Text("Pull, Merge and Rebase")
+            } footer: {
+                Text("Rebasing keeps history linear by replaying your commits on top of the remote ones. With automatic stashing, uncommitted changes are set aside first and restored afterwards.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Picker("Fetch in the background", selection: $autoFetchMinutes) {
+                    Text("Never").tag(0)
+                    Text("Every 5 Minutes").tag(5)
+                    Text("Every 10 Minutes").tag(10)
+                    Text("Every 30 Minutes").tag(30)
+                    Text("Every Hour").tag(60)
+                }
+            } header: {
+                Text("Remotes")
+            } footer: {
+                Text("Keeps ahead and behind counts up to date. Open repositories are fetched shortly after opening and then on this schedule.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }

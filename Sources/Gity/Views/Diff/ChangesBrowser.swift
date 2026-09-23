@@ -11,6 +11,8 @@ struct ChangesBrowser: View {
     let sections: [FileSection]
     /// Changing this reloads the visible diff (e.g. when the working copy changes on disk).
     var reloadToken = 0
+    /// Shown under the file list, e.g. the commit composer.
+    var fileListFooter: AnyView?
 
     @State private var selection = Set<DiffTarget.ID>()
     /// Files that were just staged or unstaged. Once they reappear in their new section they
@@ -28,8 +30,11 @@ struct ChangesBrowser: View {
 
     var body: some View {
         HSplitView {
-            fileList
-                .frame(minWidth: 200, idealWidth: 260, maxWidth: 360)
+            VStack(spacing: 0) {
+                fileList
+                fileListFooter
+            }
+            .frame(minWidth: 220, idealWidth: 280, maxWidth: 380)
 
             detail
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
@@ -83,13 +88,21 @@ struct ChangesBrowser: View {
                 stagingMenuItems(for: targets)
                 Divider()
             }
-            if targets.count == 1, let target = targets.first {
-                FileContextMenu(model: model, target: target)
+            if !targets.isEmpty {
+                FileContextMenu(model: model, targets: targets)
             }
         }
         .onKeyPress(.space) {
             guard supportsStaging, !selection.isEmpty else { return .ignored }
             toggleStaging(selectedTargets)
+            return .handled
+        }
+        .onKeyPress(.delete, phases: .down) { press in
+            // ⌘⌫ discards, as in Tower and the Finder's Move to Trash.
+            guard press.modifiers == .command, supportsStaging else { return .ignored }
+            let changes = selectedTargets.compactMap(\.workingCopyChange)
+            guard !changes.isEmpty else { return .ignored }
+            Task { await model.discard(changes) }
             return .handled
         }
     }
@@ -115,8 +128,17 @@ struct ChangesBrowser: View {
 
     @ViewBuilder
     private func stagingMenuItems(for targets: [DiffTarget]) -> some View {
-        let unstaged = targets.filter { $0.workingCopyChange.map { $0.area != .staged } ?? false }
+        let changes = targets.compactMap(\.workingCopyChange)
+        let conflicted = changes.filter { $0.area == .conflicted }
+        let unstaged = targets.filter { $0.workingCopyChange.map { $0.area == .unstaged || $0.area == .untracked } ?? false }
         let staged = targets.filter { $0.workingCopyChange?.area == .staged }
+        if !conflicted.isEmpty {
+            ConflictMenuItems(model: model, conflicts: conflicted)
+            Button(conflicted.count == 1 ? "Mark as Resolved" : "Mark \(conflicted.count) Files as Resolved") {
+                toggleStaging(targets.filter { $0.workingCopyChange?.area == .conflicted })
+            }
+            .help("Stage the file as it is now")
+        }
         if !unstaged.isEmpty {
             Button(unstaged.count == 1 ? "Stage" : "Stage \(unstaged.count) Files") {
                 toggleStaging(unstaged)
@@ -125,6 +147,12 @@ struct ChangesBrowser: View {
         if !staged.isEmpty {
             Button(staged.count == 1 ? "Unstage" : "Unstage \(staged.count) Files") {
                 toggleStaging(staged)
+            }
+        }
+        let discardable = changes.filter { $0.area != .conflicted }
+        if !discardable.isEmpty {
+            Button(discardable.count == 1 ? "Discard Changes…" : "Discard Changes to \(discardable.count) Files…") {
+                Task { await model.discard(discardable) }
             }
         }
     }
@@ -150,36 +178,117 @@ private struct SectionHeader: View {
             Text("\(section.title) (\(section.targets.count))")
             Spacer()
             if let stagingAction = section.stagingAction {
-                Button(stagingAction == .stage ? "Stage All" : "Unstage All", action: action)
+                let isConflicts = section.id == "conflicted"
+                Button(isConflicts ? "Mark All Resolved" : stagingAction == .stage ? "Stage All" : "Unstage All", action: action)
                     .buttonStyle(.link)
                     .font(.caption)
-                    .help(stagingAction == .stage ? "Stage every file in this section" : "Unstage every file in this section")
+                    .help(isConflicts ? "Stage every conflicted file as it is now" : stagingAction == .stage ? "Stage every file in this section" : "Unstage every file in this section")
             }
         }
     }
 }
 
-struct FileContextMenu: View {
+/// Resolving conflicts by taking one side. During a rebase git's "ours" is the branch being
+/// rebased onto, so the sides are swapped to keep "Mine" meaning the user's own changes.
+struct ConflictMenuItems: View {
     let model: RepositoryModel
-    let target: DiffTarget
+    let conflicts: [FileChange]
 
-    private var fileURL: URL { model.url.appending(path: target.path) }
-    private var existsOnDisk: Bool { FileManager.default.fileExists(atPath: fileURL.path) }
+    private var isRebasing: Bool { model.snapshot?.pendingOperation?.kind == .rebase }
 
     var body: some View {
-        Button("Copy Path") {
+        Button("Resolve Using Mine") {
+            Task { await model.resolveConflicts(conflicts, using: isRebasing ? .theirs : .ours) }
+        }
+        .help(isRebasing ? "Keep the version from the commit being rebased" : "Keep the version from the current branch")
+        Button("Resolve Using Theirs") {
+            Task { await model.resolveConflicts(conflicts, using: isRebasing ? .ours : .theirs) }
+        }
+        .help(isRebasing ? "Keep the version from the branch being rebased onto" : "Keep the version being merged in")
+    }
+}
+
+struct FileContextMenu: View {
+    let model: RepositoryModel
+    let targets: [DiffTarget]
+
+    private var target: DiffTarget? { targets.count == 1 ? targets.first : nil }
+
+    var body: some View {
+        if let target {
+            singleFileItems(target)
+        }
+        Button(targets.count == 1 ? "Copy Path" : "Copy Paths") {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(target.path, forType: .string)
+            NSPasteboard.general.setString(targets.map(\.path).joined(separator: "\n"), forType: .string)
+        }
+        if let target {
+            let fileURL = model.url.appending(path: target.path)
+            let existsOnDisk = FileManager.default.fileExists(atPath: fileURL.path)
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            }
+            .disabled(!existsOnDisk)
+            Button("Open with Default App") {
+                NSWorkspace.shared.open(fileURL)
+            }
+            .disabled(!existsOnDisk)
+        }
+    }
+
+    @ViewBuilder
+    private func singleFileItems(_ target: DiffTarget) -> some View {
+        switch target.source {
+        case .workingCopy(let change):
+            if change.area == .untracked {
+                ignoreMenu(for: change.path)
+            } else {
+                historyItems(path: change.path, revision: nil)
+                if change.area != .staged || change.kind != .added {
+                    Button("Stop Tracking") { Task { await model.untrack([change.path]) } }
+                        .help("Remove the file from the repository but keep it on disk")
+                }
+            }
+        case .commit(let commit, let file):
+            historyItems(path: file.path, revision: commit.sha)
+            if file.kind != .deleted {
+                Button("Restore This Version to Working Copy…") {
+                    Task { await model.restore(paths: [file.path], from: commit.sha, revisionName: commit.shortSHA) }
+                }
+            }
         }
         Divider()
-        Button("Show in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+    }
+
+    @ViewBuilder
+    private func historyItems(path: String, revision: String?) -> some View {
+        Button("Show File History") {
+            model.activeSheet = .fileInspector(FileInspectorRequest(path: path, revision: revision, mode: .history))
         }
-        .disabled(!existsOnDisk)
-        Button("Open with Default App") {
-            NSWorkspace.shared.open(fileURL)
+        Button("Blame") {
+            model.activeSheet = .fileInspector(FileInspectorRequest(path: path, revision: revision, mode: .blame))
         }
-        .disabled(!existsOnDisk)
+    }
+
+    @ViewBuilder
+    private func ignoreMenu(for path: String) -> some View {
+        let name = (path as NSString).lastPathComponent
+        let directory = (path as NSString).deletingLastPathComponent
+        Menu("Ignore") {
+            Button("Ignore “\(name)”") {
+                Task { await model.ignore(pattern: GitIgnore.pattern(forPath: path)) }
+            }
+            if let pattern = GitIgnore.pattern(forExtensionOf: path) {
+                Button("Ignore All “\(pattern)” Files") {
+                    Task { await model.ignore(pattern: pattern) }
+                }
+            }
+            if !directory.isEmpty {
+                Button("Ignore Folder “\(directory)”") {
+                    Task { await model.ignore(pattern: GitIgnore.pattern(forPath: directory, isDirectory: true)) }
+                }
+            }
+        }
     }
 }
 

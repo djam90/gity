@@ -52,6 +52,9 @@ public struct GitRunner: Sendable {
         self.workingDirectory = workingDirectory
     }
 
+    /// Writing stdin to a git that already exited would otherwise kill the app with SIGPIPE.
+    private static let ignoreBrokenPipes: Void = { signal(SIGPIPE, SIG_IGN) }()
+
     static let environment: [String: String] = {
         var environment = ProcessInfo.processInfo.environment
         // Read-only commands like `status` must not take the index lock, otherwise we would
@@ -59,6 +62,9 @@ public struct GitRunner: Sendable {
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         // Never block waiting for credentials on a terminal we do not have.
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        // There is no terminal for an editor either: merges, reverts and rebases take their
+        // default messages, and interactive rebases pass their own sequence editor.
+        environment["GIT_EDITOR"] = "true"
         // Apps launched from Finder get a minimal PATH; hooks and credential helpers expect more.
         let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         let existing = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
@@ -66,12 +72,22 @@ public struct GitRunner: Sendable {
         return environment
     }()
 
-    /// - Parameter successExitCodes: Exit codes treated as success. `git diff --no-index`
-    ///   exits with 1 when the files differ, for example.
+    /// - Parameters:
+    ///   - successExitCodes: Exit codes treated as success. `git diff --no-index`
+    ///     exits with 1 when the files differ, for example.
+    ///   - input: Written to the process's standard input (e.g. a commit message for `-F -`).
+    ///   - environment: Extra variables, e.g. `GIT_SEQUENCE_EDITOR` for interactive rebases.
     @discardableResult
-    public func run(_ arguments: [String], successExitCodes: Set<Int32> = [0]) async throws -> Data {
+    public func run(
+        _ arguments: [String],
+        successExitCodes: Set<Int32> = [0],
+        input: Data? = nil,
+        environment extraEnvironment: [String: String] = [:]
+    ) async throws -> Data {
         let executableURL = executableURL
         let workingDirectory = workingDirectory
+        let environment = Self.environment.merging(extraEnvironment) { $1 }
+        Self.ignoreBrokenPipes
 
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -79,19 +95,28 @@ public struct GitRunner: Sendable {
                 process.executableURL = executableURL
                 process.arguments = arguments
                 process.currentDirectoryURL = workingDirectory
-                process.environment = Self.environment
+                process.environment = environment
 
                 let output = Pipe()
                 let error = Pipe()
                 process.standardOutput = output
                 process.standardError = error
-                process.standardInput = FileHandle.nullDevice
+                let inputPipe = input.map { _ in Pipe() }
+                process.standardInput = inputPipe ?? FileHandle.nullDevice
 
                 do {
                     try process.run()
                 } catch {
                     continuation.resume(throwing: error)
                     return
+                }
+
+                if let inputPipe, let input {
+                    // Write off this thread so a large input can't block while git fills stdout.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        try? inputPipe.fileHandleForWriting.write(contentsOf: input)
+                        try? inputPipe.fileHandleForWriting.close()
+                    }
                 }
 
                 // Drain stderr concurrently so a chatty command cannot fill the pipe and deadlock.
@@ -119,8 +144,8 @@ public struct GitRunner: Sendable {
         }
     }
 
-    public func string(_ arguments: [String], successExitCodes: Set<Int32> = [0]) async throws -> String {
-        String(decoding: try await run(arguments, successExitCodes: successExitCodes), as: UTF8.self)
+    public func string(_ arguments: [String], successExitCodes: Set<Int32> = [0], environment: [String: String] = [:]) async throws -> String {
+        String(decoding: try await run(arguments, successExitCodes: successExitCodes, environment: environment), as: UTF8.self)
     }
 }
 

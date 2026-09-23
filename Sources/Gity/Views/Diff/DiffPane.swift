@@ -60,7 +60,7 @@ struct DiffPane: View {
             } else if document.diff.isEmpty {
                 ContentUnavailableView("No Content Changes", systemImage: "equal", description: Text(emptyDescription))
             } else {
-                DiffTextView(document: document)
+                DiffTextView(document: document, lineActions: lineActions(for: document.diff))
                     .safeAreaInset(edge: .bottom, spacing: 0) {
                         if document.diff.isTruncated {
                             truncationBanner(document.diff)
@@ -69,6 +69,21 @@ struct DiffPane: View {
             }
         } else {
             ProgressView()
+        }
+    }
+
+    /// Hunk and line staging for working copy files, when the diff maps exactly onto the file.
+    private func lineActions(for diff: FileDiff) -> DiffLineActions? {
+        guard let change = target.workingCopyChange, !ignoreWhitespace, !diff.isTruncated, !diff.isCombined else { return nil }
+        let mode: DiffLineActions.Mode
+        switch change.area {
+        case .unstaged: mode = .unstaged
+        case .untracked: mode = .untracked
+        case .staged: mode = .staged
+        case .conflicted: return nil
+        }
+        return DiffLineActions(mode: mode) { lines, discard in
+            Task { await model.applyLines(lines, of: diff, change: change, discard: discard) }
         }
     }
 

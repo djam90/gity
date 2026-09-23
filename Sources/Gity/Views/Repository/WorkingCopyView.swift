@@ -24,6 +24,12 @@ struct WorkingCopyView: View {
         .filter { !$0.targets.isEmpty }
     }
 
+    /// Rebases, cherry-picks and reverts commit through the banner's Continue button instead.
+    private var showsComposer: Bool {
+        guard let operation = model.snapshot?.pendingOperation else { return true }
+        return operation.kind == .merge
+    }
+
     var body: some View {
         let sections = sections
         if sections.isEmpty {
@@ -33,7 +39,12 @@ struct WorkingCopyView: View {
                 description: Text("There are no uncommitted changes.")
             )
         } else {
-            ChangesBrowser(model: model, sections: sections, reloadToken: model.revision)
+            ChangesBrowser(
+                model: model,
+                sections: sections,
+                reloadToken: model.revision,
+                fileListFooter: showsComposer ? AnyView(CommitComposer(model: model)) : nil
+            )
         }
     }
 }

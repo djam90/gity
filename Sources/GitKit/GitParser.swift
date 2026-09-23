@@ -269,6 +269,107 @@ public enum GitParser {
         return result
     }
 
+    // MARK: - Reflog
+
+    /// `logFormat` preceded by the reflog selector and subject.
+    public static let reflogFormat = "%gd%x1f%gs%x1f" + logFormat
+
+    /// Parses `git log --walk-reflogs --format=<reflogFormat>` output.
+    public static func reflog(_ output: String) -> [Commit] {
+        output.split(separator: recordSeparator).compactMap { record in
+            let trimmed = record.drop { $0.isNewline }
+            let parts = trimmed.split(separator: fieldSeparator, maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count == 3, let commit = commits(String(parts[2]) + String(recordSeparator)).first else { return nil }
+            return Commit(
+                sha: commit.sha, shortSHA: commit.shortSHA, parents: commit.parents,
+                authorName: commit.authorName, authorEmail: commit.authorEmail, authorDate: commit.authorDate,
+                subject: commit.subject, decorations: commit.decorations,
+                reflogSelector: String(parts[0]), reflogSubject: String(parts[1])
+            )
+        }
+    }
+
+    // MARK: - File history
+
+    /// `logFormat` with a group separator before the `--name-status` lines that follow each commit.
+    public static let fileHistoryFormat = "%x1e" + logFormat.dropLast("%x1e".count) + "%x1d"
+
+    /// Parses `git log --follow --name-status --format=<fileHistoryFormat> -- <path>`.
+    /// Commits without a status line (merges) keep the path of the newer commit.
+    public static func fileHistory(_ output: String, path: String) -> [FileHistoryEntry] {
+        var entries: [FileHistoryEntry] = []
+        var currentPath = path
+        for record in output.split(separator: recordSeparator) {
+            let parts = record.split(separator: "\u{1d}", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let commit = commits(String(parts[0]) + String(recordSeparator)).first else { continue }
+            var kind = FileChange.Kind.modified
+            var originalPath: String?
+            let status = parts.count > 1
+                ? parts[1].split(whereSeparator: \.isNewline).first { !$0.isEmpty }
+                : nil
+            if let status {
+                let fields = status.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                if let code = fields.first?.first, fields.count >= 2 {
+                    switch code {
+                    case "A": kind = .added
+                    case "D": kind = .deleted
+                    case "R", "C":
+                        kind = code == "R" ? .renamed : .copied
+                        originalPath = fields.count >= 3 ? fields[1] : nil
+                    case "T": kind = .typeChanged
+                    default: kind = .modified
+                    }
+                    currentPath = fields[fields.count - 1]
+                }
+            }
+            entries.append(FileHistoryEntry(commit: commit, path: currentPath, originalPath: originalPath, kind: kind))
+            // Older commits know the file by its name before the rename.
+            if let originalPath { currentPath = originalPath }
+        }
+        return entries
+    }
+
+    // MARK: - Blame
+
+    /// Parses `git blame --porcelain`.
+    public static func blame(_ output: String) -> Blame {
+        var result = Blame()
+        var sha: String?
+        var lineNumber = 0
+        var fields: [String: String] = [:]
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("\t") {
+                // The line's content ends each entry.
+                guard let current = sha else { continue }
+                result.lines.append(BlameLine(sha: current, lineNumber: lineNumber, text: String(line.dropFirst())))
+                if result.commits[current] == nil, let author = fields["author"] {
+                    result.commits[current] = BlameCommit(
+                        sha: current,
+                        authorName: author,
+                        authorEmail: (fields["author-mail"] ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "<>")),
+                        authorDate: Date(timeIntervalSince1970: TimeInterval(fields["author-time"] ?? "") ?? 0),
+                        summary: fields["summary"] ?? ""
+                    )
+                }
+                sha = nil
+                continue
+            }
+            let words = line.split(separator: " ", maxSplits: 1)
+            guard let key = words.first else { continue }
+            if sha == nil, key.count == 40 || key.count == 64, key.allSatisfy(\.isHexDigit) {
+                // `<sha> <original line> <final line> [<lines in group>]` starts an entry.
+                sha = String(key)
+                let numbers = words.count > 1 ? words[1].split(separator: " ") : []
+                lineNumber = numbers.count > 1 ? Int(numbers[1]) ?? 0 : 0
+                fields = [:]
+            } else {
+                fields[String(key)] = words.count > 1 ? String(words[1]) : ""
+            }
+        }
+        return result
+    }
+
     // MARK: - Stashes
 
     public static let stashFormat = "%gd%x1f%ct%x1f%gs"

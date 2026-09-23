@@ -68,11 +68,15 @@ private struct RepositoryWindowContent: View {
         } message: { error in
             Text(error.message)
         }
+        .sheet(item: $model.activeSheet) { sheet in
+            RepositorySheetView(model: model, sheet: sheet)
+        }
         .focusedSceneValue(\.repository, model)
         .task {
             dismissWindow(id: WindowID.welcome)
             await model.refresh()
             model.startWatching()
+            model.startAutoFetch()
         }
         .onAppear {
             appState.openRepositoryURLs.insert(model.url)
@@ -93,30 +97,82 @@ private struct RepositoryWindowContent: View {
 private struct RepositoryToolbar: ToolbarContent {
     let model: RepositoryModel
 
+    @AppStorage(PreferenceKey.autostash) private var autostash = true
+    @AppStorage(PreferenceKey.pullRebases) private var pullRebases = false
+
+    private var hasRemotes: Bool { !(model.snapshot?.remotes.isEmpty ?? true) }
+    private var hasBranch: Bool { model.currentBranch != nil }
+
     var body: some ToolbarContent {
+        ToolbarItem(placement: .status) {
+            if let activity = model.activity {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(activity)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+
         ToolbarItemGroup {
             Button {
                 Task { await model.fetch() }
             } label: {
-                if model.isFetching {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("Fetch", systemImage: "arrow.down.circle")
-                }
+                Label("Fetch", systemImage: "arrow.triangle.2.circlepath")
             }
-            .help("Fetch all remotes")
-            .disabled(model.isFetching || (model.snapshot?.remotes.isEmpty ?? true))
+            .help("Fetch all remotes (⇧⌘F)")
+            .disabled(model.isBusy || model.isFetching || !hasRemotes)
+
+            Menu {
+                Button("Pull (Merge)") { Task { await model.pull(rebase: false) } }
+                Button("Pull (Rebase)") { Task { await model.pull(rebase: true) } }
+                Divider()
+                Toggle("Rebase by Default", isOn: $pullRebases)
+                Toggle("Stash Local Changes Automatically", isOn: $autostash)
+            } label: {
+                Label("Pull", systemImage: "arrow.down")
+            } primaryAction: {
+                Task { await model.pull() }
+            }
+            .help(pullRebases ? "Pull with rebase (⇧⌘P)" : "Pull (⇧⌘P)")
+            .disabled(model.isBusy || !hasBranch || !hasRemotes)
+
+            Menu {
+                Button("Push") { Task { await model.push() } }
+                Button("Force Push…") { Task { await model.push(force: true) } }
+            } label: {
+                Label("Push", systemImage: "arrow.up")
+            } primaryAction: {
+                Task { await model.push() }
+            }
+            .help("Push the current branch (⇧⌘U)")
+            .disabled(model.isBusy || !hasBranch || !hasRemotes)
+        }
+
+        ToolbarItemGroup {
+            Button {
+                model.activeSheet = .newBranch(startPoint: nil, startPointName: model.headDescription)
+            } label: {
+                Label("Branch", systemImage: "arrow.triangle.branch")
+            }
+            .help("Create a branch (⇧⌘N)")
+            .disabled(model.isBusy || model.headReference == nil)
 
             Button {
-                Task { await model.refresh() }
+                model.activeSheet = .stash
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Stash", systemImage: "archivebox")
             }
-            .help("Refresh")
+            .help("Stash uncommitted changes (⌥⌘S)")
+            .disabled(model.isBusy || (model.snapshot?.status.changes.isEmpty ?? true))
         }
 
         ToolbarItem {
             Menu {
+                Button("Refresh", systemImage: "arrow.clockwise") { Task { await model.refresh() } }
+                Divider()
                 Button("Show in Finder", systemImage: "folder") { model.revealInFinder() }
                 Button("Open in Terminal", systemImage: "terminal") { model.openInTerminal() }
             } label: {
@@ -131,9 +187,22 @@ private struct RepositoryDetailView: View {
     let model: RepositoryModel
 
     var body: some View {
+        // A VStack rather than a safe area inset: split views ignore insets and would slide under the banner.
+        VStack(spacing: 0) {
+            PendingOperationBanner(model: model)
+            content
+                .frame(maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch model.selection {
         case .workingCopy:
             WorkingCopyView(model: model)
+        case .stash(let selector):
+            StashDetailView(model: model, selector: selector)
+                .id(selector)
         case .some(let item):
             CommitHistoryView(model: model, item: item)
                 .id(item)
